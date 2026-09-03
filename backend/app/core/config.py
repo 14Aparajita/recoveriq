@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     secret_key: str
     debug: bool = True
+
+    jwt_secret_key: str = "your-secret-key-here"  # or load from env
     
     database_url: str
     

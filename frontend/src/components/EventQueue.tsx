@@ -1,75 +1,118 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import LoadingSpinner from './LoadingSpinner';
-import { toast } from 'react-toastify';
+import toast from 'react-hot-toast';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export default function EventQueue() {
   const [events, setEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchEvents();
-  }, []);
+  const [retrying, setRetrying] = useState<number | null>(null);
 
   const fetchEvents = async () => {
     try {
-      const res = await axios.get(`${API_URL}/api/events/`);
+      const token = localStorage.getItem('token');
+      const res = await axios.get(`${API_URL}/api/events/`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       setEvents(res.data);
-    } catch (error) {
-      console.error('Error fetching events:', error);
+    } catch (err) {
+      toast.error('Failed to load events');
     } finally {
       setLoading(false);
     }
   };
 
-  if (loading) return <LoadingSpinner />;
+  useEffect(() => {
+    fetchEvents();
+  }, []);
+
+  const handleRetry = async (eventId: number) => {
+    setRetrying(eventId);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await axios.post(`${API_URL}/api/actions/retry/${eventId}`, {}, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      toast.success(`✅ Payment link created: ${res.data.payment_link}`);
+      fetchEvents();
+    } catch (err: any) {
+      toast.error(err.response?.data?.detail || 'Retry failed');
+    } finally {
+      setRetrying(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="animate-pulse mt-8 space-y-4">
+        {[...Array(6)].map((_, i) => (
+          <div key={i} className="h-16 glass-card bg-slate-200/50 dark:bg-slate-800/50 rounded-xl"></div>
+        ))}
+      </div>
+    );
+  }
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-4">Failed Payment Events</h1>
+    <div className="animate-fade-in mt-4">
+      <div className="flex items-center gap-3 mb-6">
+        <div className="page-icon text-lg">⟳</div>
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Event Queue</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">Manage and manually retry failed payment events.</p>
+        </div>
+      </div>
+
       {events.length === 0 ? (
-        <p className="text-gray-500">No events. Generate synthetic data first.</p>
+        <div className="empty-state mt-8">
+          <div className="empty-icon text-4xl">📭</div>
+          <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-1">Queue is empty</h3>
+          <p className="text-sm text-slate-500 dark:text-slate-400">No pending failed payments to show.</p>
+        </div>
       ) : (
-        <div className="bg-white rounded-xl shadow overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Decline Code</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Recoverable</th>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  <button 
-                    onClick={() => handleRetry(e.id)}
-                    className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600"
-                  >
-                    Retry
-                  </button>
-                </td>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {events.map((e) => (
-                <tr key={e.id}>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{e.id}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{e.order_id}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">₹{e.amount}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{e.decline_code}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{e.decline_category || '—'}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    <span className={`px-2 py-1 rounded-full text-xs ${e.ground_truth_recoverable ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                      {e.ground_truth_recoverable ? 'Yes' : 'No'}
-                    </span>
-                  </td>
+        <div className="glass-card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse whitespace-nowrap">
+              <thead>
+                <tr className="bg-slate-50/80 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800">
+                  <th className="table-th w-20">ID</th>
+                  <th className="table-th">Order</th>
+                  <th className="table-th">Amount</th>
+                  <th className="table-th">Decline Code</th>
+                  <th className="table-th">Category</th>
+                  <th className="table-th">Recoverable</th>
+                  <th className="table-th text-right">Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
+                {events.map((e) => (
+                  <tr key={e.id} className="table-tr">
+                    <td className="table-td font-medium">{e.id}</td>
+                    <td className="table-td font-mono text-xs">{e.order_id}</td>
+                    <td className="table-td font-semibold">₹{parseFloat(e.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                    <td className="table-td">
+                      <span className="badge-neutral font-mono">{e.decline_code}</span>
+                    </td>
+                    <td className="table-td text-slate-600 dark:text-slate-400 capitalize">{e.decline_category?.replace('_', ' ') || '—'}</td>
+                    <td className="table-td">
+                      <span className={e.ground_truth_recoverable ? 'badge-success' : 'badge-danger'}>
+                        {e.ground_truth_recoverable ? 'Yes' : 'No'}
+                      </span>
+                    </td>
+                    <td className="table-td text-right">
+                      <button
+                        onClick={() => handleRetry(e.id)}
+                        disabled={retrying === e.id}
+                        className="btn-ghost py-1.5 px-4 text-xs tracking-wide"
+                      >
+                        {retrying === e.id ? 'Retrying...' : 'Retry Now'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

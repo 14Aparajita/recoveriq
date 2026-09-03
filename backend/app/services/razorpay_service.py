@@ -1,4 +1,6 @@
 import razorpay
+import time
+import random
 from ..core.config import get_settings
 
 settings = get_settings()
@@ -9,15 +11,18 @@ def create_payment_link(order_id: str, amount: float, currency: str = "INR") -> 
     Create a Razorpay Test Mode Payment Link for recovery.
     Returns dict with payment_link_id, short_url, and other details.
     """
+    # Append timestamp + random to make reference_id unique per retry
+    unique_ref = f"{order_id}_{int(time.time())}_{random.randint(1000, 9999)}"
+    
     data = {
         "amount": int(amount * 100),  # in paise
         "currency": currency,
         "description": f"Recovery payment for order {order_id}",
-        "reference_id": order_id,   # your order ID
+        "reference_id": unique_ref,   # now unique for every retry
         "customer": {
             "name": "Test Customer",
-            "email": "test@example.com",
-            "contact": "9999999999"
+            "email": "customer@example.com",
+            "contact": "9876543210"
         },
         "notify": {
             "sms": True,
@@ -25,9 +30,10 @@ def create_payment_link(order_id: str, amount: float, currency: str = "INR") -> 
         },
         "reminder_enable": True,
         "notes": {
-            "policy": "recovery_agent"
+            "policy": "recovery_agent",
+            "original_order": order_id   # keep original for reference
         },
-        "callback_url": "https://yourdomain.com/api/payment-callback",  # optional
+        "callback_url": "https://yourdomain.com/api/payment-callback",
         "callback_method": "get"
     }
     payment_link = client.payment_link.create(data)

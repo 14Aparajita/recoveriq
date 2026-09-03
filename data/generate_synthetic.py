@@ -11,7 +11,6 @@ DECLINE_CODES = [
     ("OTHER", 0.20),
 ]
 
-# Ground truth: recoverable probabilities per category
 RECOVERABLE_PROB = {
     "INSUFFICIENT_FUNDS": 0.7,
     "ISSUER_TIMEOUT": 0.8,
@@ -22,13 +21,18 @@ RECOVERABLE_PROB = {
 
 def generate_events(n=1000):
     events = []
+    now = datetime.now()
     for i in range(n):
         decline_code, _ = random.choices(DECLINE_CODES, weights=[p for _, p in DECLINE_CODES])[0]
         category = decline_code
         amount = round(random.uniform(100, 50000), 2)
         order_id = f"ord_{uuid.uuid4().hex[:8]}"
         recoverable = 1 if random.random() < RECOVERABLE_PROB[category] else 0
-        timestamp = datetime.now() - timedelta(days=random.randint(0, 30))
+        # Spread timestamp over last 30 days
+        days_ago = random.randint(0, 30)
+        hours_ago = random.randint(0, 23)
+        minutes_ago = random.randint(0, 59)
+        timestamp = now - timedelta(days=days_ago, hours=hours_ago, minutes=minutes_ago)
         events.append({
             "order_id": order_id,
             "amount": amount,
@@ -45,4 +49,4 @@ if __name__ == "__main__":
         writer = csv.DictWriter(f, fieldnames=events[0].keys())
         writer.writeheader()
         writer.writerows(events)
-    print("Generated 1000 synthetic events.")
+    print("Generated 1000 synthetic events with spread timestamps.")

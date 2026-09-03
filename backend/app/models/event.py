@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Enum, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Enum, ForeignKey
 from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
 from ..core.database import Base
 import enum
 
@@ -19,5 +20,9 @@ class Event(Base):
     decline_category = Column(Enum(DeclineCategory), nullable=True)
     customer_segment = Column(String(32), nullable=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    synthetic = Column(Integer, default=1)  # 1 for generated, 0 for real (test)
-    ground_truth_recoverable = Column(Integer, nullable=True)  # 1=yes, 0=no
+    synthetic = Column(Integer, default=1)
+    ground_truth_recoverable = Column(Integer, nullable=True)
+    merchant_id = Column(Integer, ForeignKey("merchants.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)  # denormalized for fast filtering
+    merchant = relationship("Merchant", backref="events")
+    user = relationship("User")
