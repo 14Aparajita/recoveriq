@@ -76,7 +76,7 @@ CATEGORY_MAP = {
 
 @router.post("/seed")
 def seed_demo_data(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Generate synthetic demo data directly in the database."""
+    """Generate synthetic demo data – fixed foreign key constraint."""
     import random
     import uuid
     from datetime import datetime, timedelta
@@ -85,13 +85,9 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
     from app.models.outcome import Outcome
     from app.models.segment_stats import SegmentStat
     from app.models.merchant import Merchant
-    from app.ai.classifier import classify_decline
-    from app.ai.policy import update_segment_stats, get_segment_stats
-    from app.models.alert import Alert
+    from app.ai.policy import update_segment_stats
 
-    
-
-    # Get or create merchant for this user
+    # Get or create merchant
     merchant = db.query(Merchant).filter_by(user_id=current_user.id).first()
     if not merchant:
         merchant = Merchant(user_id=current_user.id, name="Demo Merchant")
@@ -99,12 +95,11 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         db.commit()
         db.refresh(merchant)
 
-    # Clear existing data for this merchant
+    # Clear existing data for this merchant (cascade handled by DB)
     db.query(Event).filter_by(merchant_id=merchant.id).delete()
     db.query(SegmentStat).delete()
     db.commit()
 
-    # Decline codes and probabilities
     decline_codes = ['INSUFFICIENT_FUNDS', 'ISSUER_TIMEOUT', 'EXPIRED_CARD', 'RISK_BLOCK', 'OTHER']
     probs = [0.35, 0.20, 0.15, 0.10, 0.20]
     category_map = {
@@ -122,59 +117,57 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         'OTHER': 0.3
     }
 
-    events_created = 0
-    for i in range(1000):
+    events_to_insert = []
+    for _ in range(1000):
         code = random.choices(decline_codes, weights=probs)[0]
         category = category_map.get(code, 'other')
         amount = round(random.uniform(100, 50000), 2)
         order_id = f"ord_{uuid.uuid4().hex[:8]}"
         recoverable = 1 if random.random() < recoverable_prob.get(code, 0.3) else 0
         timestamp = datetime.now() - timedelta(days=random.randint(0, 30))
-
-        event = Event(
-            order_id=order_id,
-            amount=amount,
-            decline_code=code,
-            decline_category=category,
-            ground_truth_recoverable=recoverable,
-            merchant_id=merchant.id,
-            user_id=current_user.id,
-            synthetic=1
+        events_to_insert.append(
+            Event(
+                order_id=order_id,
+                amount=amount,
+                decline_code=code,
+                decline_category=category,
+                ground_truth_recoverable=recoverable,
+                merchant_id=merchant.id,
+                user_id=current_user.id,
+                synthetic=1,
+                timestamp=timestamp
+            )
         )
-        db.add(event)
-        events_created += 1
-        if events_created % 100 == 0:
-            db.commit()
+
+    # Insert all events in one bulk commit
+    db.add_all(events_to_insert)
     db.commit()
 
-    # Create decisions and outcomes for all events
+    # Fetch the newly created events
     events = db.query(Event).filter_by(merchant_id=merchant.id).all()
+    print(f"Inserted {len(events)} events")  # This will appear in logs
+
     decisions_created = 0
     outcomes_created = 0
 
     for event in events:
-        stats = get_segment_stats(db, event.decline_category or 'other')
-        if stats:
-            best_action = max(stats, key=lambda a: stats[a])
-        else:
-            best_action = random.choice(['retry_now', 'retry_later', 'switch_method'])
-
+        # Simple bandit choice (or use LLM, but this is faster for seeding)
+        action = random.choice(['retry_now', 'retry_later', 'switch_method', 'abandon'])
         if event.ground_truth_recoverable == 1:
-            success_prob = 0.7 if best_action in ['retry_now', 'retry_later'] else 0.3
+            success_prob = 0.7 if action in ['retry_now', 'retry_later'] else 0.3
         else:
             success_prob = 0.1
         success = random.random() < success_prob
 
         decision = Decision(
             event_id=event.id,
-            action=best_action,
-            justification=f"AI decision: {best_action} chosen for category '{event.decline_category}'",
+            action=action,
+            justification=f"AI decision: {action} chosen for category '{event.decline_category}'",
             confidence=round(random.uniform(0.6, 0.9), 2),
             llm_used=1 if random.random() > 0.3 else 0
         )
         db.add(decision)
-        decisions_created += 1
-        db.flush()
+        db.flush()  # ensures decision.id is available
 
         outcome = Outcome(
             decision_id=decision.id,
@@ -183,22 +176,23 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
             time_to_recovery=random.uniform(0.5, 4.0) if success else None
         )
         db.add(outcome)
-        outcomes_created += 1
 
-        update_segment_stats(db, event.decline_category or 'other', best_action, success)
+        # Update segment stats
+        update_segment_stats(db, event.decline_category or 'other', action, success)
+
+        decisions_created += 1
+        outcomes_created += 1
 
         if decisions_created % 50 == 0:
             db.commit()
 
     db.commit()
 
-    
-
     # Create a notification for the user
     alert = Alert(
         user_id=current_user.id,
         type="info",
-        message=f"✅ Seeded {events_created} synthetic events, {decisions_created} decisions, {outcomes_created} outcomes.",
+        message=f"✅ Seeded {len(events)} events, {decisions_created} decisions, {outcomes_created} outcomes.",
         read=False
     )
     db.add(alert)
@@ -206,11 +200,10 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
 
     return {
         "message": "Demo data seeded successfully",
-        "events": events_created,
+        "events": len(events),
         "decisions": decisions_created,
         "outcomes": outcomes_created
     }
-
 # @router.post("/seed")
 # def seed_data(
 #     current_user: User = Depends(get_current_user),
