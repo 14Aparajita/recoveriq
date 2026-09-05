@@ -73,144 +73,284 @@ CATEGORY_MAP = {
     'OTHER': 'other',
 }
 
+
 @router.post("/seed")
-def seed_data(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Seed the database with synthetic events, decisions, outcomes, and
-    segment stats for the currently logged-in user.
-    Clears any previous synthetic data first to avoid duplicates.
-    """
-    # ---- 1. Ensure the user has a merchant ----
+def seed_demo_data(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Generate synthetic demo data directly in the database."""
+    import random
+    from app.models.event import Event
+    from app.models.decision import Decision
+    from app.models.outcome import Outcome
+    from app.models.segment_stats import SegmentStat
+    from app.models.merchant import Merchant
+    from app.ai.classifier import classify_decline
+    from app.ai.policy import update_segment_stats, get_segment_stats
+    
+    # Get user's merchant (create one if not exists)
     merchant = db.query(Merchant).filter_by(user_id=current_user.id).first()
     if not merchant:
-        merchant = Merchant(user_id=current_user.id, name="Demo Merchant")
+        merchant = Merchant(
+            user_id=current_user.id,
+            name="Demo Merchant"
+        )
         db.add(merchant)
         db.commit()
         db.refresh(merchant)
-
-    # ---- 2. Clear old synthetic data for this user ----
-    old_event_ids = [e.id for e in db.query(Event).filter_by(user_id=current_user.id).all()]
-    if old_event_ids:
-        old_decision_ids = [d.id for d in db.query(Decision).filter(Decision.event_id.in_(old_event_ids)).all()]
-        if old_decision_ids:
-            db.query(Outcome).filter(Outcome.decision_id.in_(old_decision_ids)).delete(synchronize_session=False)
-            db.query(Alert).filter(Alert.decision_id.in_(old_decision_ids)).delete(synchronize_session=False)
-            db.query(Decision).filter(Decision.id.in_(old_decision_ids)).delete(synchronize_session=False)
-        db.query(Alert).filter(Alert.event_id.in_(old_event_ids)).delete(synchronize_session=False)
-        db.query(Event).filter(Event.id.in_(old_event_ids)).delete(synchronize_session=False)
-    db.query(SegmentStat).delete(synchronize_session=False)
+    
+    # Clear existing data for this merchant
+    db.query(Event).filter_by(merchant_id=merchant.id).delete()
+    db.query(SegmentStat).delete()
     db.commit()
-
-    # ---- 3. Load CSV ----
-    csv_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "synthetic_events.csv")
-    csv_path = os.path.normpath(csv_path)
-
-    if not os.path.exists(csv_path):
-        # Fall back to the absolute path used in the original script
-        csv_path = r"C:\MyFolders\IIITNR\Projects\Razorpay\recoveriq\data\synthetic_events.csv"
-
-    if not os.path.exists(csv_path):
-        raise HTTPException(404, f"Synthetic CSV not found at {csv_path}")
-
-    rows = []
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    # ---- 4. Insert events ----
-    event_count = 0
-    for row in rows:
-        mapped_category = CATEGORY_MAP.get(row['decline_category'], 'other')
+    
+    # Generate 1000 synthetic events
+    decline_codes = [
+        ("INSUFFICIENT_FUNDS", 0.35),
+        ("ISSUER_TIMEOUT", 0.20),
+        ("EXPIRED_CARD", 0.15),
+        ("RISK_BLOCK", 0.10),
+        ("OTHER", 0.20),
+    ]
+    
+    category_map = {
+        'INSUFFICIENT_FUNDS': 'insufficient_funds',
+        'ISSUER_TIMEOUT': 'issuer_timeout',
+        'EXPIRED_CARD': 'expired_instrument',
+        'RISK_BLOCK': 'risk_block',
+        'OTHER': 'other'
+    }
+    
+    recoverable_prob = {
+        'INSUFFICIENT_FUNDS': 0.7,
+        'ISSUER_TIMEOUT': 0.8,
+        'EXPIRED_CARD': 0.1,
+        'RISK_BLOCK': 0.2,
+        'OTHER': 0.3
+    }
+    
+    import uuid
+    from datetime import datetime, timedelta
+    
+    events_created = 0
+    for i in range(1000):
+        code, _ = random.choices(
+            [c for c, _ in decline_codes],
+            weights=[p for _, p in decline_codes]
+        )[0]
+        category = category_map.get(code, 'other')
+        amount = round(random.uniform(100, 50000), 2)
+        order_id = f"ord_{uuid.uuid4().hex[:8]}"
+        recoverable = 1 if random.random() < recoverable_prob.get(code, 0.3) else 0
+        timestamp = datetime.now() - timedelta(days=random.randint(0, 30))
+        
         event = Event(
-            order_id=row['order_id'],
-            amount=float(row['amount']),
-            decline_code=row['decline_code'],
-            decline_category=mapped_category,
-            ground_truth_recoverable=int(row['ground_truth_recoverable']),
+            order_id=order_id,
+            amount=amount,
+            decline_code=code,
+            decline_category=category,
+            ground_truth_recoverable=recoverable,
             merchant_id=merchant.id,
             user_id=current_user.id,
-            synthetic=1,
+            synthetic=1
         )
         db.add(event)
-        event_count += 1
-        if event_count % 100 == 0:
+        events_created += 1
+        
+        # Flush in batches of 100
+        if events_created % 100 == 0:
             db.commit()
+    
     db.commit()
-
-    # ---- 5. Generate decisions + outcomes via bandit policy ----
-    events = db.query(Event).filter_by(user_id=current_user.id).all()
-    decision_count = 0
-    outcome_count = 0
-    recovered_count = 0
-    total_revenue = 0.0
-
+    
+    # Create decisions and outcomes
+    events = db.query(Event).filter_by(merchant_id=merchant.id).all()
+    decisions_created = 0
+    outcomes_created = 0
+    
     for event in events:
-        category = event.decline_category or 'other'
-        stats = get_segment_stats(db, category)
-        action = bandit_choose_action(stats, epsilon=0.3) if stats else "retry_now"
-
-        # Simulate outcome based on ground truth
+        stats = get_segment_stats(db, event.decline_category or 'other')
+        if stats:
+            best_action = max(stats, key=lambda a: stats[a])
+        else:
+            best_action = random.choice(['retry_now', 'retry_later', 'switch_method'])
+        
         if event.ground_truth_recoverable == 1:
-            success_prob = 0.7 if action in ["retry_now", "retry_later"] else 0.3
+            success_prob = 0.7 if best_action in ['retry_now', 'retry_later'] else 0.3
         else:
             success_prob = 0.1
         success = random.random() < success_prob
-
+        
         decision = Decision(
             event_id=event.id,
-            action=action,
-            justification=f"AI decision: {action} chosen based on category '{category}'",
-            confidence=round(random.uniform(0.6, 0.95), 2),
-            llm_used=1 if random.random() > 0.3 else 0,
+            action=best_action,
+            justification=f"AI decision: {best_action} chosen for category '{event.decline_category}'",
+            confidence=round(random.uniform(0.6, 0.9), 2),
+            llm_used=1 if random.random() > 0.3 else 0
         )
         db.add(decision)
-        db.flush()  # get decision.id
-        decision_count += 1
-
-        rev = event.amount if success else 0.0
+        decisions_created += 1
+        db.flush()
+        
         outcome = Outcome(
             decision_id=decision.id,
             recovered=1 if success else 0,
-            revenue_recovered=rev,
-            time_to_recovery=round(random.uniform(0.5, 4.0), 2) if success else None,
+            revenue_recovered=event.amount if success else 0.0,
+            time_to_recovery=random.uniform(0.5, 4.0) if success else None
         )
         db.add(outcome)
-        outcome_count += 1
-        if success:
-            recovered_count += 1
-            total_revenue += rev
-
-        # Update bandit segment stats
-        update_segment_stats(db, category, action, success)
-
-        if decision_count % 50 == 0:
+        outcomes_created += 1
+        
+        update_segment_stats(db, event.decline_category or 'other', best_action, success)
+        
+        if decisions_created % 50 == 0:
             db.commit()
+    
     db.commit()
-
-    # ---- 6. Create a few sample alerts ----
-    sample_decisions = db.query(Decision).join(Event).filter(
-        Event.user_id == current_user.id
-    ).order_by(Decision.id.desc()).limit(5).all()
-    for d in sample_decisions:
-        alert = Alert(
-            user_id=current_user.id,
-            event_id=d.event_id,
-            decision_id=d.id,
-            type="recovery_attempt",
-            message=f"AI chose '{d.action}' for event #{d.event_id} (confidence: {d.confidence})",
-        )
-        db.add(alert)
-    db.commit()
-
+    
     return {
-        "status": "success",
-        "events_created": event_count,
-        "decisions_created": decision_count,
-        "outcomes_created": outcome_count,
-        "recovered_count": recovered_count,
-        "total_revenue_recovered": round(total_revenue, 2),
-        "message": f"Database seeded with {event_count} events. Refresh your dashboard!",
+        "message": "Demo data seeded successfully",
+        "events": events_created,
+        "decisions": decisions_created,
+        "outcomes": outcomes_created
     }
+
+# @router.post("/seed")
+# def seed_data(
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Seed the database with synthetic events, decisions, outcomes, and
+#     segment stats for the currently logged-in user.
+#     Clears any previous synthetic data first to avoid duplicates.
+#     """
+#     # ---- 1. Ensure the user has a merchant ----
+#     merchant = db.query(Merchant).filter_by(user_id=current_user.id).first()
+#     if not merchant:
+#         merchant = Merchant(user_id=current_user.id, name="Demo Merchant")
+#         db.add(merchant)
+#         db.commit()
+#         db.refresh(merchant)
+
+#     # ---- 2. Clear old synthetic data for this user ----
+#     old_event_ids = [e.id for e in db.query(Event).filter_by(user_id=current_user.id).all()]
+#     if old_event_ids:
+#         old_decision_ids = [d.id for d in db.query(Decision).filter(Decision.event_id.in_(old_event_ids)).all()]
+#         if old_decision_ids:
+#             db.query(Outcome).filter(Outcome.decision_id.in_(old_decision_ids)).delete(synchronize_session=False)
+#             db.query(Alert).filter(Alert.decision_id.in_(old_decision_ids)).delete(synchronize_session=False)
+#             db.query(Decision).filter(Decision.id.in_(old_decision_ids)).delete(synchronize_session=False)
+#         db.query(Alert).filter(Alert.event_id.in_(old_event_ids)).delete(synchronize_session=False)
+#         db.query(Event).filter(Event.id.in_(old_event_ids)).delete(synchronize_session=False)
+#     db.query(SegmentStat).delete(synchronize_session=False)
+#     db.commit()
+
+#     # ---- 3. Load CSV ----
+#     csv_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "synthetic_events.csv")
+#     csv_path = os.path.normpath(csv_path)
+
+#     if not os.path.exists(csv_path):
+#         # Fall back to the absolute path used in the original script
+#         csv_path = r"C:\MyFolders\IIITNR\Projects\Razorpay\recoveriq\data\synthetic_events.csv"
+
+#     if not os.path.exists(csv_path):
+#         raise HTTPException(404, f"Synthetic CSV not found at {csv_path}")
+
+#     rows = []
+#     with open(csv_path, 'r', encoding='utf-8') as f:
+#         reader = csv.DictReader(f)
+#         rows = list(reader)
+
+#     # ---- 4. Insert events ----
+#     event_count = 0
+#     for row in rows:
+#         mapped_category = CATEGORY_MAP.get(row['decline_category'], 'other')
+#         event = Event(
+#             order_id=row['order_id'],
+#             amount=float(row['amount']),
+#             decline_code=row['decline_code'],
+#             decline_category=mapped_category,
+#             ground_truth_recoverable=int(row['ground_truth_recoverable']),
+#             merchant_id=merchant.id,
+#             user_id=current_user.id,
+#             synthetic=1,
+#         )
+#         db.add(event)
+#         event_count += 1
+#         if event_count % 100 == 0:
+#             db.commit()
+#     db.commit()
+
+#     # ---- 5. Generate decisions + outcomes via bandit policy ----
+#     events = db.query(Event).filter_by(user_id=current_user.id).all()
+#     decision_count = 0
+#     outcome_count = 0
+#     recovered_count = 0
+#     total_revenue = 0.0
+
+#     for event in events:
+#         category = event.decline_category or 'other'
+#         stats = get_segment_stats(db, category)
+#         action = bandit_choose_action(stats, epsilon=0.3) if stats else "retry_now"
+
+#         # Simulate outcome based on ground truth
+#         if event.ground_truth_recoverable == 1:
+#             success_prob = 0.7 if action in ["retry_now", "retry_later"] else 0.3
+#         else:
+#             success_prob = 0.1
+#         success = random.random() < success_prob
+
+#         decision = Decision(
+#             event_id=event.id,
+#             action=action,
+#             justification=f"AI decision: {action} chosen based on category '{category}'",
+#             confidence=round(random.uniform(0.6, 0.95), 2),
+#             llm_used=1 if random.random() > 0.3 else 0,
+#         )
+#         db.add(decision)
+#         db.flush()  # get decision.id
+#         decision_count += 1
+
+#         rev = event.amount if success else 0.0
+#         outcome = Outcome(
+#             decision_id=decision.id,
+#             recovered=1 if success else 0,
+#             revenue_recovered=rev,
+#             time_to_recovery=round(random.uniform(0.5, 4.0), 2) if success else None,
+#         )
+#         db.add(outcome)
+#         outcome_count += 1
+#         if success:
+#             recovered_count += 1
+#             total_revenue += rev
+
+#         # Update bandit segment stats
+#         update_segment_stats(db, category, action, success)
+
+#         if decision_count % 50 == 0:
+#             db.commit()
+#     db.commit()
+
+#     # ---- 6. Create a few sample alerts ----
+#     sample_decisions = db.query(Decision).join(Event).filter(
+#         Event.user_id == current_user.id
+#     ).order_by(Decision.id.desc()).limit(5).all()
+#     for d in sample_decisions:
+#         alert = Alert(
+#             user_id=current_user.id,
+#             event_id=d.event_id,
+#             decision_id=d.id,
+#             type="recovery_attempt",
+#             message=f"AI chose '{d.action}' for event #{d.event_id} (confidence: {d.confidence})",
+#         )
+#         db.add(alert)
+#     db.commit()
+
+#     return {
+#         "status": "success",
+#         "events_created": event_count,
+#         "decisions_created": decision_count,
+#         "outcomes_created": outcome_count,
+#         "recovered_count": recovered_count,
+#         "total_revenue_recovered": round(total_revenue, 2),
+#         "message": f"Database seeded with {event_count} events. Refresh your dashboard!",
+#     }
