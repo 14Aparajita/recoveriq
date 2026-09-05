@@ -87,6 +87,9 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
     from app.models.merchant import Merchant
     from app.ai.classifier import classify_decline
     from app.ai.policy import update_segment_stats, get_segment_stats
+    from app.models.alert import Alert
+
+    
 
     # Get or create merchant for this user
     merchant = db.query(Merchant).filter_by(user_id=current_user.id).first()
@@ -187,6 +190,18 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         if decisions_created % 50 == 0:
             db.commit()
 
+    db.commit()
+
+    
+
+    # Create a notification for the user
+    alert = Alert(
+        user_id=current_user.id,
+        type="info",
+        message=f"✅ Seeded {events_created} synthetic events, {decisions_created} decisions, {outcomes_created} outcomes.",
+        read=False
+    )
+    db.add(alert)
     db.commit()
 
     return {
