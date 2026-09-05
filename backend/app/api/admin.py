@@ -78,6 +78,8 @@ CATEGORY_MAP = {
 def seed_demo_data(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Generate synthetic demo data directly in the database."""
     import random
+    import uuid
+    from datetime import datetime, timedelta
     from app.models.event import Event
     from app.models.decision import Decision
     from app.models.outcome import Outcome
@@ -85,32 +87,23 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
     from app.models.merchant import Merchant
     from app.ai.classifier import classify_decline
     from app.ai.policy import update_segment_stats, get_segment_stats
-    
-    # Get user's merchant (create one if not exists)
+
+    # Get or create merchant for this user
     merchant = db.query(Merchant).filter_by(user_id=current_user.id).first()
     if not merchant:
-        merchant = Merchant(
-            user_id=current_user.id,
-            name="Demo Merchant"
-        )
+        merchant = Merchant(user_id=current_user.id, name="Demo Merchant")
         db.add(merchant)
         db.commit()
         db.refresh(merchant)
-    
+
     # Clear existing data for this merchant
     db.query(Event).filter_by(merchant_id=merchant.id).delete()
     db.query(SegmentStat).delete()
     db.commit()
-    
-    # Generate 1000 synthetic events
-    decline_codes = [
-        ("INSUFFICIENT_FUNDS", 0.35),
-        ("ISSUER_TIMEOUT", 0.20),
-        ("EXPIRED_CARD", 0.15),
-        ("RISK_BLOCK", 0.10),
-        ("OTHER", 0.20),
-    ]
-    
+
+    # Decline codes and probabilities
+    decline_codes = ['INSUFFICIENT_FUNDS', 'ISSUER_TIMEOUT', 'EXPIRED_CARD', 'RISK_BLOCK', 'OTHER']
+    probs = [0.35, 0.20, 0.15, 0.10, 0.20]
     category_map = {
         'INSUFFICIENT_FUNDS': 'insufficient_funds',
         'ISSUER_TIMEOUT': 'issuer_timeout',
@@ -118,7 +111,6 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         'RISK_BLOCK': 'risk_block',
         'OTHER': 'other'
     }
-    
     recoverable_prob = {
         'INSUFFICIENT_FUNDS': 0.7,
         'ISSUER_TIMEOUT': 0.8,
@@ -126,22 +118,16 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         'RISK_BLOCK': 0.2,
         'OTHER': 0.3
     }
-    
-    import uuid
-    from datetime import datetime, timedelta
-    
+
     events_created = 0
     for i in range(1000):
-        code, _ = random.choices(
-            [c for c, _ in decline_codes],
-            weights=[p for _, p in decline_codes]
-        )[0]
+        code = random.choices(decline_codes, weights=probs)[0]
         category = category_map.get(code, 'other')
         amount = round(random.uniform(100, 50000), 2)
         order_id = f"ord_{uuid.uuid4().hex[:8]}"
         recoverable = 1 if random.random() < recoverable_prob.get(code, 0.3) else 0
         timestamp = datetime.now() - timedelta(days=random.randint(0, 30))
-        
+
         event = Event(
             order_id=order_id,
             amount=amount,
@@ -154,31 +140,28 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         )
         db.add(event)
         events_created += 1
-        
-        # Flush in batches of 100
         if events_created % 100 == 0:
             db.commit()
-    
     db.commit()
-    
-    # Create decisions and outcomes
+
+    # Create decisions and outcomes for all events
     events = db.query(Event).filter_by(merchant_id=merchant.id).all()
     decisions_created = 0
     outcomes_created = 0
-    
+
     for event in events:
         stats = get_segment_stats(db, event.decline_category or 'other')
         if stats:
             best_action = max(stats, key=lambda a: stats[a])
         else:
             best_action = random.choice(['retry_now', 'retry_later', 'switch_method'])
-        
+
         if event.ground_truth_recoverable == 1:
             success_prob = 0.7 if best_action in ['retry_now', 'retry_later'] else 0.3
         else:
             success_prob = 0.1
         success = random.random() < success_prob
-        
+
         decision = Decision(
             event_id=event.id,
             action=best_action,
@@ -189,7 +172,7 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         db.add(decision)
         decisions_created += 1
         db.flush()
-        
+
         outcome = Outcome(
             decision_id=decision.id,
             recovered=1 if success else 0,
@@ -198,14 +181,14 @@ def seed_demo_data(current_user: User = Depends(get_current_user), db: Session =
         )
         db.add(outcome)
         outcomes_created += 1
-        
+
         update_segment_stats(db, event.decline_category or 'other', best_action, success)
-        
+
         if decisions_created % 50 == 0:
             db.commit()
-    
+
     db.commit()
-    
+
     return {
         "message": "Demo data seeded successfully",
         "events": events_created,
