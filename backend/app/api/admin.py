@@ -115,7 +115,7 @@ def seed_demo_data(
         code = random.choices(decline_codes, weights=probs)[0]
         category = category_map.get(code, 'other')
         amount = round(random.uniform(100, 50000), 2)
-        order_id = f"ord_{uuid.uuid4().hex[:8]}"
+        order_id = f"ord_{uuid.uuid4().hex[:8]}"   # Now works
         recoverable = 1 if random.random() < recoverable_prob.get(code, 0.3) else 0
         timestamp = datetime.now() - timedelta(days=random.randint(0, 30))
 
@@ -133,9 +133,9 @@ def seed_demo_data(
         events_created += 1
         if events_created % 100 == 0:
             db.commit()
-    db.commit()  # ensure all events are persisted
+    db.commit()
 
-    # Now create decisions and outcomes for all events
+    # Create decisions and outcomes
     events = db.query(Event).filter_by(merchant_id=merchant.id).all()
     decisions_created = 0
     outcomes_created = 0
@@ -162,7 +162,7 @@ def seed_demo_data(
         )
         db.add(decision)
         decisions_created += 1
-        db.flush()  # get decision.id
+        db.flush()
 
         outcome = Outcome(
             decision_id=decision.id,
@@ -180,7 +180,7 @@ def seed_demo_data(
 
     db.commit()
 
-    # Create a notification for the user
+    # Create notification
     alert = Alert(
         user_id=current_user.id,
         type="info",
@@ -196,6 +196,7 @@ def seed_demo_data(
         "decisions": decisions_created,
         "outcomes": outcomes_created
     }
+
 # @router.post("/seed")
 # def seed_data(
 #     current_user: User = Depends(get_current_user),
