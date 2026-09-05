@@ -33,6 +33,27 @@ export default function Dashboard() {
     fetchMetrics();
   }, []);
 
+  const seedDemoData = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      toast.error('Please login first');
+      return;
+    }
+    try {
+      const res = await api.post('/api/admin/seed', {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      toast.success(`✅ Seeded ${res.data.events} events, ${res.data.decisions} decisions, ${res.data.outcomes} outcomes`);
+      // Refresh dashboard data
+      await fetchMetrics();   // your existing function to reload metrics
+      // Optionally reload the page after 2 seconds to ensure all components are fresh
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || 'Failed to seed data';
+      toast.error(msg);
+    }
+  };
+  
   const seedDatabase = async () => {
     const token = localStorage.getItem('token');
     if (!token) {
